@@ -136,9 +136,15 @@ def evaluate(
     if max_samples:
         dataset = dataset.select(range(min(max_samples, len(dataset))))
 
-    model, tokenizer = load_model_and_tokenizer(model_path)
-    device_str = next(model.parameters()).device
-    print(f"Model loaded on {device_str}")
+    # ---------- Baseline mode (no model loaded) ----------
+    baseline = model_path is None
+    if baseline:
+        print("No --model_path provided — running **baseline** (always predict no tool)\n")
+    else:
+        model, tokenizer = load_model_and_tokenizer(model_path)
+        device_str = next(model.parameters()).device
+        print(f"Model loaded on {device_str}")
+
     print(f"Evaluating on {len(dataset)} examples...\n")
 
     stats = Counter()
@@ -146,11 +152,6 @@ def evaluate(
 
     for idx, example in enumerate(dataset):
         messages = example["messages"]
-        try:
-            prompt = build_prompt(messages, tokenizer)
-        except ValueError as e:
-            errors.append((idx, str(e)))
-            continue
 
         gold_content = get_first_assistant_content(messages)
         if gold_content is None:
@@ -160,23 +161,32 @@ def evaluate(
         gold_calls = parse_tool_calls(gold_content)
         gold_has_tool = len(gold_calls) > 0 and all("_valid" not in c for c in gold_calls)
 
-        # Generate
-        inputs = tokenizer(prompt, return_tensors="pt").to(device_str)
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=temperature > 0,
-                temperature=temperature if temperature > 0 else None,
-                top_p=top_p,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-        generated = tokenizer.decode(
-            outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=False
-        )
+        if baseline:
+            # Naive baseline: never predicts a tool call
+            pred_calls = []
+        else:
+            try:
+                prompt = build_prompt(messages, tokenizer)
+            except ValueError as e:
+                errors.append((idx, str(e)))
+                continue
 
-        pred_calls = parse_tool_calls(generated)
+            inputs = tokenizer(prompt, return_tensors="pt").to(device_str)
+            with torch.no_grad():
+                outputs = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=temperature > 0,
+                    temperature=temperature if temperature > 0 else None,
+                    top_p=top_p,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+            generated = tokenizer.decode(
+                outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=False
+            )
+            pred_calls = parse_tool_calls(generated)
+
         pred_has_tool = len(pred_calls) > 0
         pred_valid = pred_has_tool and all("_valid" not in c for c in pred_calls)
 
@@ -228,8 +238,9 @@ def evaluate(
             print(f"  Processed {idx + 1}/{len(dataset)}")
 
     total = len(dataset) - len(errors)
+    label = "BASELINE" if baseline else "RESULTS"
     print(f"\n{'='*60}")
-    print("RESULTS")
+    print(f"  {label}")
     print(f"{'='*60}")
     print(f"Total evaluated     : {total}")
     print(f"Skipped (errors)    : {len(errors)}")
@@ -257,7 +268,7 @@ def evaluate(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate Qwen3 tool-calling SFT model")
-    parser.add_argument("--model_path", default="./qwen3-toolcalling-sft", help="Path to model or LoRA adapter")
+    parser.add_argument("--model_path", default=None, help="Path to model or LoRA adapter (omit for baseline)")
     parser.add_argument("--max_samples", type=int, default=None, help="Limit eval to N examples")
     parser.add_argument("--max_new_tokens", type=int, default=1024, help="Generation length")
     parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature (0 = greedy)")
