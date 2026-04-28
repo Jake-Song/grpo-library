@@ -1,0 +1,21 @@
+# Required packages for Qwen3.5 Tool-Calling SFT
+transformers>=4.44.0
+trl>=0.9.0
+datasets>=2.19.0
+torch>=2.3.0
+accelerate>=0.31.0
+peft>=0.11.0
+sentencepiece>=0.2.0
+protobuf>=4.0.0
+
+# Optional: for LoRA fine-tuning
+# pip install peft accelerate
+
+# Optional: for Weights & Biases logging
+# pip install wandb
+
+# Optional: for tensorboard
+# pip install tensorboard
+
+# Optional: for LLaMA-Factory alternative
+# pip install llamafactory
