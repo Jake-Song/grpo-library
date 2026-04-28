@@ -859,7 +859,7 @@ def _smoke_test() -> None:
 # Training pipeline (TRL GRPOTrainer + vLLM colocate)
 # =============================================================================
 
-MODEL_NAME = "Qwen/Qwen3.5-4B"
+MODEL_NAME = "unsloth/Qwen3.5-0.6B"
 DATASET_NAME = "allenai/IF_multi_constraints_upto5"
 DATASET_CONFIG = "default"
 

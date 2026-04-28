@@ -7,19 +7,42 @@ Standalone single-file port of `scripts/if_train.py` for Colab. Same task
 but the trainer is `trl.GRPOTrainer` and rollouts go through Unsloth's
 bundled vLLM (`fast_inference=True`) instead of a separate vLLM server.
 
-Reference notebook:
-  https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_8B_FP8_GRPO.ipynb
+Reference notebook (canonical Colab T4 install):
+  https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_(4B)-GRPO.ipynb
 
-Colab install (paste into a cell BEFORE running this script):
+Colab install (paste into a cell BEFORE running this script). This is
+the official Unsloth GRPO install snippet — it detects T4 at runtime and
+pins vllm==0.9.2 + triton==3.2.0 (Turing-compatible). Newer GPUs get
+vllm==0.15.1. Don't change these pins without testing — Unsloth + vLLM +
+TRL is extremely picky and breaks easily on Colab.
 
     %%capture
-    import os, re, torch
-    v = re.match(r'[\d]+\.[\d]+', str(torch.__version__)).group(0)
-    xformers = {'2.10':'0.0.34', '2.9':'0.0.33.post1', '2.8':'0.0.32.post2'}.get(v, '0.0.34')
+    import os, subprocess
+    os.environ["UNSLOTH_VLLM_STANDBY"] = "1"  # 30%+ memory savings for RL
     !pip install --upgrade -qqq uv
-    !uv pip install -qqq sentencepiece protobuf "datasets==4.3.0" "huggingface_hub>=0.34.0" hf_transfer
-    !uv pip install -qqq --no-deps unsloth_zoo bitsandbytes accelerate xformers=={xformers} peft triton unsloth
-    !uv pip install -qqq vllm==0.15.1
+    if "COLAB_" not in "".join(os.environ.keys()):
+        !pip install unsloth vllm
+    else:
+        try:
+            import numpy, PIL
+            _numpy = f'numpy=={numpy.__version__}'
+            _pil = f'pillow=={PIL.__version__}'
+        except Exception:
+            _numpy, _pil = "numpy", "pillow"
+        try:
+            _gpu = subprocess.check_output(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]).decode()
+        except Exception:
+            _gpu = ""
+        # vLLM>=0.10 dropped Turing kernels — T4 (and any AWS g4 instance)
+        # must stay on 0.9.2 + triton 3.2.0. L4/A100/H100 take the latest.
+        if "T4" in _gpu:
+            _vllm, _triton = "vllm==0.9.2", "triton==3.2.0"
+        elif "L4" in _gpu or "A100" in _gpu or "H100" in _gpu:
+            _vllm, _triton = "vllm==0.15.1", "triton"
+        else:
+            _vllm, _triton = "vllm==0.15.1", "triton"  # unknown GPU — assume modern
+        !uv pip install -qqq --upgrade {_vllm} {_numpy} {_pil} torchvision bitsandbytes xformers unsloth
+        !uv pip install -qqq {_triton}
     !uv pip install -qqq transformers==4.56.2
     !uv pip install -qqq --no-deps trl==0.22.2
 
@@ -859,18 +882,58 @@ def _smoke_test() -> None:
 # Training pipeline (Unsloth + TRL + bundled vLLM)
 # =============================================================================
 
-# Tweak these for your Colab GPU.
-MODEL_NAME = "unsloth/Qwen3-4B-Thinking-2507"
+MODEL_NAME = "unsloth/Qwen3.5-0.6B"
 DATASET_NAME = "allenai/IF_multi_constraints_upto5"
 DATASET_CONFIG = "default"
 
-MAX_SEQ_LENGTH = 4096
-LORA_RANK = 32
+# Detect GPU and pick a profile. Capabilities differ:
+#   T4   (Turing, 16GB)  — no bf16, no FP8 → 4bit + fp16, tight VRAM
+#   L4   (Ada,    24GB)  — bf16/FP8 ok but VRAM-bound → 4bit + bf16
+#   A100 (Ampere, 40/80) — bf16, no FP8 hardware
+#   H100 (Hopper, 80GB)  — native FP8 → fastest path
+import subprocess as _sp
+try:
+    _GPU = _sp.check_output(
+        ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
+    ).decode().strip()
+except Exception:
+    _GPU = ""
+
+if "H100" in _GPU:
+    MAX_SEQ_LENGTH = 8192
+    LORA_RANK = 32
+    PER_DEVICE_BATCH_SIZE = 16
+    NUM_GENERATIONS = 16
+    LOAD_IN_4BIT = False
+    LOAD_IN_FP8 = True
+    GPU_MEMORY_UTILIZATION = 0.9
+elif "A100" in _GPU:
+    MAX_SEQ_LENGTH = 4096
+    LORA_RANK = 32
+    PER_DEVICE_BATCH_SIZE = 8
+    NUM_GENERATIONS = 8
+    LOAD_IN_4BIT = False
+    LOAD_IN_FP8 = False
+    GPU_MEMORY_UTILIZATION = 0.85
+elif "L4" in _GPU:
+    MAX_SEQ_LENGTH = 4096
+    LORA_RANK = 32
+    PER_DEVICE_BATCH_SIZE = 4
+    NUM_GENERATIONS = 4
+    LOAD_IN_4BIT = True
+    LOAD_IN_FP8 = False
+    GPU_MEMORY_UTILIZATION = 0.7
+else:  # T4 (incl. AWS g4) or unknown — assume tightest constraints
+    MAX_SEQ_LENGTH = 2048
+    LORA_RANK = 16
+    PER_DEVICE_BATCH_SIZE = 4
+    NUM_GENERATIONS = 4
+    LOAD_IN_4BIT = True
+    LOAD_IN_FP8 = False
+    GPU_MEMORY_UTILIZATION = 0.6
 
 MAX_TRAIN_EXAMPLES = 1200       # cap dataset size; matches if_train.py default
 MAX_PROMPT_QUANTILE = 0.9       # filter out the longest 10% of prompts
-PER_DEVICE_BATCH_SIZE = 4
-NUM_GENERATIONS = 4             # if_train uses 16; 4 fits Colab VRAM
 GRAD_ACCUM_STEPS = 1
 MAX_STEPS = 100
 SAVE_STEPS = 100
@@ -931,15 +994,17 @@ def main() -> None:
     from unsloth import FastLanguageModel
     from vllm import SamplingParams
 
-    print(f"Loading {MODEL_NAME} (FP8 + LoRA r={LORA_RANK})...")
+    _quant = "fp8" if LOAD_IN_FP8 else ("4bit" if LOAD_IN_4BIT else "bf16")
+    print(f"Loading {MODEL_NAME} on {_GPU or 'unknown GPU'} ({_quant} + LoRA r={LORA_RANK})...")
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=MODEL_NAME,
         max_seq_length=MAX_SEQ_LENGTH,
-        load_in_4bit=False,
+        load_in_4bit=LOAD_IN_4BIT,
         load_in_8bit=False,
-        load_in_fp8=True,
+        load_in_fp8=LOAD_IN_FP8,
         fast_inference=True,
         max_lora_rank=LORA_RANK,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
         full_finetuning=False,
     )
     model = FastLanguageModel.get_peft_model(
