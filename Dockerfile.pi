@@ -1,0 +1,15 @@
+FROM node:22-slim
+
+# Install basic system utils (git, cores for signal handling)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    less \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @mariozechner/pi-coding-agent
+
+WORKDIR /workspace
+
+# Default entrypoint: pi in interactive mode
+# Pass -- to forward additional args: docker run ... pi-agent -- --model claude-sonnet-4
+ENTRYPOINT ["pi"]
